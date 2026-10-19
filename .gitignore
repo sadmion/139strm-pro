@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+config/
+config.json
+tasks.json
+diag_log.json
+play_state.json
+cas_cache.json
+139strm.log
+devdata/
+strm/
+*.zip

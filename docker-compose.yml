@@ -1,0 +1,23 @@
+name: 139strm-pro
+services:
+  139strm-pro:
+    # 需要在本地构建时，把下面一行换成： build: .
+    image: 139strm-pro:3.0.0
+    build: .
+    container_name: 139strm-pro
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+    volumes:
+      # 配置 + 任务列表 + 播放诊断（务必挂到宿主机，否则重建容器就丢）
+      - ./config:/app/config
+      # 生成的 strm，Emby / Jellyfin / 飞牛影视 也挂这个
+      - ./strm:/strm
+    environment:
+      - PORT=8025
+      - CONFIG_PATH=/app/config/config.json
+      - YUN139_OUTPUT_DIR=/strm
+      - TZ=Asia/Shanghai
+      # 可选：用环境变量注入凭据（优先级高于界面配置）
+      # - YUN139_AUTHORIZATION=
+      # - YUN139_CLOUD_TYPE=personal_new

@@ -1,0 +1,17 @@
+name: 139strm-pro
+services:
+  139strm-pro:
+    build: .
+    image: 139strm-pro:3.0.0
+    container_name: 139strm-pro
+    restart: unless-stopped
+    # host 网络：与 Emby 同主机时，strm 里可以直接写 http://127.0.0.1:8025
+    network_mode: host
+    volumes:
+      - ./config:/app/config
+      - ./strm:/strm
+    environment:
+      - PORT=8025
+      - CONFIG_PATH=/app/config/config.json
+      - YUN139_OUTPUT_DIR=/strm
+      - TZ=Asia/Shanghai
