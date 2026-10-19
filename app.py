@@ -826,8 +826,17 @@ def api_debug_list():
 @app.get("/api/list")
 def api_list():
     cfg = load_config()
-    folder = request.args.get("folder") or "/"
-    target = folder if folder not in ("", "root") else None
+    folder = (request.args.get("folder") or "/").strip()
+    # 根目录用空串或 "/" 都归一到接入点自己的根 ID；
+    # 其它情况必须是云盘返回的 fileId（形如 Fruo07iH...），不能是「/目录名」这种路径
+    target = folder if folder not in ("", "root", "/") else None
+    if target is not None and target.startswith("/"):
+        return jsonify({
+            "ok": False,
+            "error": ("目录参数看起来是路径而不是 fileId。云盘只接受 fileId"
+                      "（一串字母数字），请从「存储浏览」里逐级点击进入。"),
+            "folder": folder,
+        }), 400
     try:
         client = get_client(cfg)
         if target is None:
@@ -837,11 +846,11 @@ def api_list():
         return jsonify({"ok": True, "items": [i.to_dict() for i in items],
                         "folder": folder, "folder_id": target})
     except Yun139Error as exc:
-        logger.warning("列出目录失败 folder=%s: %s", target or folder, exc)
+        logger.warning("列出目录失败 folder_id=%s: %s", target or folder, exc)
         return jsonify({"ok": False, "error": str(exc),
                         "folder": folder, "folder_id": target or ""}), 400
     except Exception as exc:      # noqa: BLE001
-        logger.exception("列出目录出现未预期错误 folder=%s", target or folder)
+        logger.exception("列出目录出现未预期错误 folder_id=%s", target or folder)
         return jsonify({"ok": False,
                         "error": f"{type(exc).__name__}: {exc}",
                         "folder": folder}), 500

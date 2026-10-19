@@ -79,6 +79,9 @@ pre.log{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddin
 .browse-list{max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
 .rowlink{display:flex;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer}
 .rowlink:hover{background:var(--panel2)}
+.rowlink.disabled{cursor:default;opacity:.55}
+.rowlink.disabled:hover{background:transparent}
+.rowlink.errline{color:var(--err);cursor:default}
 .pathbar{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .chip{background:var(--panel2);border:1px solid var(--line);border-radius:99px;padding:2px 10px;font-size:12px;cursor:pointer}
@@ -195,7 +198,7 @@ pre.log{background:#0b0d11;border:1px solid var(--line);border-radius:8px;paddin
       <div class="card">
         <div class="pathbar">
           <button class="ghost sm" onclick="browseUp()">⬆ 上级</button>
-          <span class="mono" id="browsePath">/</span>
+          <span class="mono" id="browsePath">根目录</span>
           <span style="flex:1"></span>
           <button class="sm" onclick="quickTask()">+ 在此目录新建任务</button>
         </div>
@@ -589,49 +592,98 @@ async function pollStatus(){
 }
 pollStatus();
 
-/* ---------------- 目录浏览 ---------------- */
-let browseCur='/', browseInited=false, pickCur='/', pickTarget='task';
-async function browseTo(path){
-  browseInited = true; browseCur = path;
-  $('browsePath').textContent = path;
-  const j = await api('/api/list?folder='+encodeURIComponent(path));
-  if(!j.ok){ $('browseList').innerHTML = `<div class="rowlink muted">${esc(j.error||'读取失败')}</div>`; return; }
-  $('browseList').innerHTML = j.items.length ? j.items.map(it=>`
-    <div class="rowlink" ${it.is_folder?`onclick="browseTo('${esc((path.replace(/\/$/,'')+'/'+it.name))}')"`:''}>
-      <span>${it.is_folder?'📁':'🎬'} ${esc(it.name)}</span>
+/* ---------------- 目录浏览 ----------------
+ * 关键：云盘目录用一长串 fileId 标识，**不能用名字拼路径当 ID**。
+ * 之前用 path 拼 '/'+name 当 parentFileId 发给云盘，所以点进任何子目录都是「资源不存在」。
+ * 这里维护一个栈 [{id, name}]，ID 只从接口返回的 file_id 取，name 只用于显示。
+ */
+let browseStack = [{id:'/', name:'根目录'}];
+let browseInited = false;
+let pickStack = [{id:'/', name:'根目录'}];
+
+const stackId = s => s[s.length-1].id;
+const stackPath = s => '/' + s.slice(1).map(x => x.name).join('/');
+const stackTitle = s => s.map(x => x.name).join(' / ');
+
+// 云盘里有几个「特殊目录」不是普通 fileId（例如我的应用收藏 /myfaverapp），点进去必然失败
+const isSpecialId = id => !id || id.startsWith('/');
+
+async function browseTo(folderId, name){
+  // 兼容旧调用：传的是 '/' 开头且不是特殊 ID 时，当作根目录重新开始
+  if (folderId === '/' || folderId === 'root') { browseStack = [{id:'/', name:'根目录'}]; }
+  else if (name !== undefined) { browseStack.push({id:folderId, name}); }
+  browseInited = true;
+  const id = stackId(browseStack);
+  $('browsePath').textContent = stackTitle(browseStack);
+  $('browseList').innerHTML = '<div class="rowlink muted">加载中…</div>';
+  const j = await api('/api/list?folder='+encodeURIComponent(id));
+  if(!j.ok){
+    $('browseList').innerHTML = `<div class="rowlink errline">❌ ${esc(j.error||'读取失败')}<br>
+      <span class="muted mono">folder_id=${esc(id)}</span></div>`;
+    return;
+  }
+  if(!j.items.length){ $('browseList').innerHTML = '<div class="rowlink muted">空目录</div>'; return; }
+  $('browseList').innerHTML = j.items.map((it, idx)=>{
+    const special = it.is_folder && isSpecialId(it.file_id);
+    const clickable = it.is_folder && !special;
+    return `<div class="rowlink${special?' disabled':''}" data-idx="${idx}"
+        ${clickable?`data-open="1"`:''} title="${esc(it.file_id)}">
+      <span>${it.is_folder?'📁':'🎬'} ${esc(it.name)}${special?' <span class="tag">特殊目录</span>':''}</span>
       <span class="muted">${it.is_folder?'':fmtSize(it.size)}</span>
-    </div>`).join('') : '<div class="rowlink muted">空目录</div>';
+    </div>`;
+  }).join('');
+  // 用事件绑定而不是内联 onclick：目录名里有引号也不会破坏页面
+  $('browseList').querySelectorAll('[data-open="1"]').forEach(el=>{
+    el.onclick = () => {
+      const it = j.items[Number(el.dataset.idx)];
+      browseTo(it.file_id, it.name);
+    };
+  });
 }
 function browseUp(){
-  if(browseCur==='/') return;
-  const p = browseCur.replace(/\/$/,'');
-  browseTo(p.slice(0, p.lastIndexOf('/')) || '/');
+  if (browseStack.length <= 1) return;
+  browseStack.pop();
+  browseTo(stackId(browseStack));
 }
 function quickTask(){
+  const id = stackId(browseStack);
+  if (isSpecialId(id) && id !== '/') { toast('这是特殊目录，不能用于建任务', 'err'); return; }
   openTaskEditor();
-  $('t_folder_path').value = browseCur;
-  $('t_folder_id').value = browseCur;
-  if(!$('t_name').value) $('t_name').value = browseCur.split('/').filter(Boolean).pop() || 'task';
+  $('t_folder_id').value = id;
+  $('t_folder_path').value = stackPath(browseStack);
+  if(!$('t_name').value){
+    const last = browseStack[browseStack.length-1].name;
+    $('t_name').value = (last === '根目录' ? 'all' : last);
+  }
 }
 function pickFolder(){
-  pickCur = $('t_folder_path').value || '/';
-  $('pickModal').classList.remove('hidden'); pickLoad();
+  pickStack = [{id:'/', name:'根目录'}];
+  $('pickModal').classList.remove('hidden');
+  pickLoad();
 }
 async function pickLoad(){
-  $('pickPath').textContent = pickCur;
-  const j = await api('/api/list?folder='+encodeURIComponent(pickCur));
-  if(!j.ok){ $('pickList').innerHTML = `<div class="rowlink muted">${esc(j.error||'读取失败')}</div>`; return; }
-  $('pickList').innerHTML = j.items.filter(i=>i.is_folder).map(it=>`
-    <div class="rowlink" onclick="pickCur='${esc((pickCur.replace(/\/$/,'')+'/'+it.name))}';pickLoad()">
-      <span>📁 ${esc(it.name)}</span></div>`).join('') || '<div class="rowlink muted">没有子目录</div>';
+  $('pickPath').textContent = stackTitle(pickStack);
+  $('pickList').innerHTML = '<div class="rowlink muted">加载中…</div>';
+  const j = await api('/api/list?folder='+encodeURIComponent(stackId(pickStack)));
+  if(!j.ok){
+    $('pickList').innerHTML = `<div class="rowlink errline">❌ ${esc(j.error||'读取失败')}</div>`;
+    return;
+  }
+  const dirs = j.items.filter(i=>i.is_folder && !isSpecialId(i.file_id));
+  $('pickList').innerHTML = dirs.length ? dirs.map((it, idx)=>`
+    <div class="rowlink" data-idx="${idx}"><span>📁 ${esc(it.name)}</span></div>`).join('')
+    : '<div class="rowlink muted">没有子目录</div>';
+  $('pickList').querySelectorAll('[data-idx]').forEach(el=>{
+    el.onclick = () => { const it = dirs[Number(el.dataset.idx)]; pickStack.push({id:it.file_id, name:it.name}); pickLoad(); };
+  });
 }
 function pickUp(){
-  if(pickCur==='/') return;
-  const p = pickCur.replace(/\/$/,'');
-  pickCur = p.slice(0, p.lastIndexOf('/')) || '/'; pickLoad();
+  if (pickStack.length <= 1) return;
+  pickStack.pop(); pickLoad();
 }
 function pickChoose(){
-  $('t_folder_path').value = pickCur; $('t_folder_id').value = pickCur;
+  $('t_folder_id').value = stackId(pickStack);
+  $('t_folder_path').value = stackPath(pickStack);
   $('pickModal').classList.add('hidden');
 }
 

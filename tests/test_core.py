@@ -607,6 +607,44 @@ def test_quota_and_notfound_are_classified():
         c2.list_files("/")
 
 
+def test_list_rejects_path_like_folder():
+    """回归：前端曾把 '/目录名' 当 parentFileId 传给云盘，导致「资源不存在」。
+
+    现在必须在到达云盘之前就拦下，并给出能看懂的提示。
+    """
+    import app as appmod
+    from yun139.store import Store
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    appmod.STORE = Store(tmp + "/config.json")
+    appmod.STORE.update_config({"authorization": "tok"})
+
+    calls = []
+
+    class C:
+        root_folder_id = "/"
+
+        def list_files(self, folder_id=None):
+            calls.append(folder_id)
+            return []
+
+    appmod.get_client = lambda cfg: C()
+    client = appmod.app.test_client()
+
+    r = client.get("/api/list?folder=/随缘更新")
+    assert r.status_code == 400, r.get_json()
+    assert "fileId" in r.get_json()["error"]
+    assert not calls, "路径式参数不应该被发给云盘"
+
+    r2 = client.get("/api/list?folder=/")
+    assert r2.status_code == 200 and r2.get_json()["ok"] is True
+    assert calls == ["/"], "根目录应归一为接入点根 ID"
+
+    r3 = client.get("/api/list?folder=FlYjEgD9B9yQAbQvETLJD5oEKjl8kQeUk")
+    assert r3.status_code == 200
+    assert calls[-1] == "FlYjEgD9B9yQAbQvETLJD5oEKjl8kQeUk"
+
+
 # ---------------------------------------------------------------------------
 # 路由（不触网）
 # ---------------------------------------------------------------------------

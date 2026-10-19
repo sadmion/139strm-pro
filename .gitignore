@@ -11,3 +11,7 @@ cas_cache.json
 devdata/
 strm/
 *.zip
+
+run_out.log
+run_err.log
+*.log
