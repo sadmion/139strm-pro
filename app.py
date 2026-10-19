@@ -753,7 +753,7 @@ def api_test():
         expire = client.get_expire_time()
         return jsonify({
             "ok": True,
-            "account": client.account,
+            "account": client.account or client.account_name(),
             "host": client.personal_host,
             "root_items": len(items),
             "folders": sum(1 for i in items if i.is_folder),
@@ -768,19 +768,83 @@ def api_test():
         return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+@app.get("/api/debug/list")
+def api_debug_list():
+    """目录列表诊断：把「发出去的请求」和「云盘原样返回」都摆出来。
+
+    排查「资源不存在」这类问题时，先看这里：
+      * init 是否拿到接入点、account 是否解出来了
+      * 实际发往 /file/list 的 URL 和 body
+      * 云盘的原始响应（success / message / 条目数）
+    """
+    cfg = load_config()
+    folder = request.args.get("folder") or "/"
+    out = {"ok": True, "folder": folder}
+    try:
+        client = get_client(cfg)
+        out["account"] = client.account or client.account_name()
+        out["host"] = client.personal_host
+        out["cloud_type"] = client.cloud_type
+        out["client_type"] = client.client_type
+        out["root_folder_id"] = client.root_folder_id
+    except Exception as exc:      # noqa: BLE001
+        out.update(ok=False, stage="init", error=f"{type(exc).__name__}: {exc}")
+        return jsonify(out), 400
+
+    target = folder if folder not in ("", "root") else client.root_folder_id
+    payload = {
+        "imageThumbnailStyleList": ["Small", "Large"],
+        "orderBy": "updated_at",
+        "orderDirection": "DESC",
+        "pageInfo": {"pageCursor": "", "pageSize": 100},
+        "parentFileId": target,
+    }
+    out["request_url"] = client.personal_host + "/file/list"
+    out["request_body"] = payload
+    out["account_info_sent"] = client._common_account_info()
+    try:
+        resp = client._personal_post("/file/list", payload)
+        data = resp.get("data") or {}
+        items = data.get("items") or data.get("fileList") or []
+        out["raw_keys"] = sorted(resp.keys())
+        out["success"] = resp.get("success")
+        out["message"] = resp.get("message") or resp.get("msg") or ""
+        out["item_count"] = len(items)
+        out["items_sample"] = [
+            {"name": i.get("name"), "type": i.get("type"),
+             "size": i.get("size"), "id": (i.get("fileId") or "")[:12]}
+            for i in items[:5]
+        ]
+        out["data_keys"] = sorted(data.keys()) if isinstance(data, dict) else str(type(data))
+    except Yun139Error as exc:
+        out.update(ok=False, stage="file/list", error=str(exc))
+    except Exception as exc:      # noqa: BLE001
+        out.update(ok=False, stage="file/list", error=f"{type(exc).__name__}: {exc}")
+    return jsonify(out)
+
+
 @app.get("/api/list")
 def api_list():
     cfg = load_config()
     folder = request.args.get("folder") or "/"
+    target = folder if folder not in ("", "root") else None
     try:
         client = get_client(cfg)
-        items = client.list_files(folder if folder not in ("", "root") else
-                                  client.root_folder_id)
+        if target is None:
+            target = client.root_folder_id
+        items = client.list_files(target)
         items.sort(key=lambda i: (not i.is_folder, i.name.lower()))
         return jsonify({"ok": True, "items": [i.to_dict() for i in items],
-                        "folder": folder})
+                        "folder": folder, "folder_id": target})
     except Yun139Error as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 400
+        logger.warning("列出目录失败 folder=%s: %s", target or folder, exc)
+        return jsonify({"ok": False, "error": str(exc),
+                        "folder": folder, "folder_id": target or ""}), 400
+    except Exception as exc:      # noqa: BLE001
+        logger.exception("列出目录出现未预期错误 folder=%s", target or folder)
+        return jsonify({"ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "folder": folder}), 500
 
 
 # ----------------------------------------------------------------------

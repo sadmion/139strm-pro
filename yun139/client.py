@@ -273,6 +273,18 @@ class Yun139Client:
         ms = self._token_expiry_ms()
         return None if ms is None else ms - time.time() * 1000
 
+    def account_name(self):
+        """Authorization 里解出的账号（手机号）。
+
+        路由查询和 ``commonAccountInfo`` 都要用它；不要依赖 ``init()`` 是否跑过 ——
+        否则一旦初始化的顺序有变，就会发出 ``account=""`` 的请求，被服务端回
+        「资源不存在」这种毫不相干的报错。
+        """
+        try:
+            return self._split_authorization()[1]
+        except AuthError:
+            return self.account or self.username or ""
+
     def refresh_token(self):
         """续期令牌；返回 True 表示凭据发生了变化。
 
@@ -487,6 +499,8 @@ class Yun139Client:
 
     def _personal_post(self, pathname, data):
         self._ensure_hosts()
+        if not self.personal_host:
+            raise Yun139Error("个人云接入点地址为空，请重新执行「测试连接」")
         return self._post(self.personal_host + pathname, data,
                           use_new_headers=True, pc_headers=True,
                           headers_builder=self._headers_blend)
@@ -495,7 +509,7 @@ class Yun139Client:
         return self._post(YUN_ORIGIN + pathname, data, use_new_headers=False)
 
     def _common_account_info(self):
-        return {"account": self.account, "accountType": 1}
+        return {"account": self.account_name(), "accountType": 1}
 
     def _new_json(self, data):
         merged = {
@@ -512,46 +526,65 @@ class Yun139Client:
     # ------------------------------------------------------------------
 
     def init(self):
-        """校验凭据、必要时续期，并查询各云的接入地址。"""
+        """校验凭据、必要时续期，并查询各云的接入地址。
+
+        ``_lock`` 只保护**首次初始化**这一段，且用「双重检查」而不是全程持有：
+        ``_post`` 内部会走 ``_ensure_hosts``，若把整段都包在锁里，
+        一旦有别的路径在锁内发请求就会自锁死；更重要的是别让锁把
+        已经初始化好的其它线程挡在门外。
+        """
+        if self.personal_host and self.account:
+            return self
         with self._lock:
-            if not self.authorization and self.mail_cookies:
-                self.login_with_cookies()
-            try:
-                self.refresh_token()
-            except AuthError:
-                if not self._relogin_with_cookies():
-                    raise
-                logger.info("令牌已过期，已用邮箱 Cookie 重新登录获取新令牌")
+            if self.personal_host and self.account:
+                return self
+            self._init_locked()
+        return self
 
-            resp = self._post(ROUTE_POLICY_URL, {
-                "userInfo": {
-                    "userType": 1,
-                    "accountType": 1,
-                    "accountName": self.account,
-                },
-                "modAddrType": 1,
-            }, use_new_headers=False)
+    def _init_locked(self):
+        if not self.authorization and self.mail_cookies:
+            self.login_with_cookies()
+        # 先解出账号，保证路由查询和后续 commonAccountInfo 都有值
+        self.account = self.account_name()
+        try:
+            self.refresh_token()
+        except AuthError:
+            if not self._relogin_with_cookies():
+                raise
+            logger.info("令牌已过期，已用邮箱 Cookie 重新登录获取新令牌")
 
-            personal = group = family = ""
-            for item in (resp.get("data") or {}).get("routePolicyList") or []:
-                if not isinstance(item, dict):
-                    continue
-                mod = item.get("modName")
-                url = item.get("httpsUrl") or ""
-                if mod == "personal":
-                    personal = url
-                elif mod == "group":
-                    group = url
-                elif mod == "family":
-                    family = url
+        resp = self._post(ROUTE_POLICY_URL, {
+            "userInfo": {
+                "userType": 1,
+                "accountType": 1,
+                "accountName": self.account,
+            },
+            "modAddrType": 1,
+        }, use_new_headers=False)
 
-            if not personal:
-                raise AuthError("未能获取个人云接入地址，请检查 Authorization 是否有效")
-            if self.cloud_type in ("group", "family") and not group:
-                raise AuthError("未能获取群组/家庭云接入地址")
-            self.personal_host = personal.rstrip("/")
-            self.group_host = (group or "").rstrip("/")
-            self.family_host = (family or "").rstrip("/")
+        personal = group = family = ""
+        for item in (resp.get("data") or {}).get("routePolicyList") or []:
+            if not isinstance(item, dict):
+                continue
+            mod = item.get("modName")
+            url = item.get("httpsUrl") or ""
+            if mod == "personal":
+                personal = url
+            elif mod == "group":
+                group = url
+            elif mod == "family":
+                family = url
+
+        if not personal:
+            raise AuthError(
+                "未能从路由策略里取到个人云接入地址 —— 通常意味着 Authorization "
+                "无效或已过期（请在浏览器重新抓一次）。接口返回："
+                + str(resp.get("data") or resp)[:200])
+        if self.cloud_type in ("group", "family") and not group:
+            raise AuthError("未能获取群组/家庭云接入地址")
+        self.personal_host = personal.rstrip("/")
+        self.group_host = (group or "").rstrip("/")
+        self.family_host = (family or "").rstrip("/")
         return self
 
     def _relogin_with_cookies(self):
@@ -653,13 +686,17 @@ class Yun139Client:
     def _personal_list(self, parent_file_id, page_size=100):
         """新版个人云目录列表（``/file/list``），带翻页保护。
 
-        翻页保护：接口偶发返回「下一页游标等于当前游标」时，旧实现会无限循环、
-        疯狂请求接口。这里用 seen 集合兜底，最多翻 2000 页。
+        翻页保护（三重要）：
+          1. 接口偶发把 ``nextPageCursor`` 原样返回（游标不前进）时，
+             必须**立刻停**，否则会无限翻页把接口打爆；
+          2. 同一页可能被重复返回，按 ``fileId`` 去重，避免目录里出现重复条目；
+          3. 最多 2000 页，防止异常数据把内存打满。
         """
         self._ensure_hosts()
         items = []
+        by_id = {}
         cursor = ""
-        seen = set()
+        seen_cursors = set()
         pages = 0
         while True:
             data = {
@@ -674,10 +711,11 @@ class Yun139Client:
             batch = payload.get("items")
             if batch is None:
                 batch = payload.get("fileList") or []
+            seen_cursors.add(cursor)
             for it in batch:
                 if not isinstance(it, dict):
                     continue
-                items.append(FileItem(
+                item = FileItem(
                     file_id=it.get("fileId") or it.get("id") or "",
                     name=it.get("name") or "",
                     size=int(it.get("size") or 0),
@@ -685,12 +723,19 @@ class Yun139Client:
                     modified=parse_personal_time(it.get("updatedAt")
                                                  or it.get("updateTime")
                                                  or it.get("createdAt") or ""),
-                ))
-            cursor = payload.get("nextPageCursor") or ""
+                )
+                key = item.file_id or (item.name, item.is_folder)
+                if key in by_id:
+                    continue
+                by_id[key] = item
+                items.append(item)
+            next_cursor = payload.get("nextPageCursor") or ""
             pages += 1
-            if not cursor or not batch or cursor in seen or pages >= 2000:
+            if (not next_cursor or not batch
+                    or next_cursor in seen_cursors      # 游标不前进 → 立刻停
+                    or pages >= 2000):
                 break
-            seen.add(cursor)
+            cursor = next_cursor
         return items
 
     def _legacy_personal_list(self, catalog_id):

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """离线单元测试：签名、加解密、CAS 分片/解析、STRM 生成、cron、配置存储、路由。
 
 全部不访问网络：网络调用一律用假 client 替身。
@@ -507,6 +507,104 @@ def test_pc_client_info_declares_500gb_type():
     web = Yun139Client(authorization="x", client_type="web")
     assert pc._client_info().split("|")[2] == "13"
     assert web._client_info().split("|")[2] == "9"
+
+
+def _auth(account="13800138000"):
+    return base64.b64encode(
+        f"pc:{account}:tok|a|b|9999999999999".encode()).decode()
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self.status_code = 200
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    """记录所有 POST，并按 URL 返回预设结果。"""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def post(self, url, data=None, headers=None, timeout=None):
+        body = json.loads(data) if isinstance(data, (bytes, str)) else data
+        self.calls.append({"url": url, "body": body, "headers": headers or {}})
+        if "qryRoutePolicy" in url:
+            return _FakeResp({"success": True, "data": {"routePolicyList": [
+                {"modName": "personal", "httpsUrl": "https://personal-kd-njs.yun.139.com"}]}})
+        if "/file/list" in url:
+            return _FakeResp(self.routes.get("file/list",
+                                             {"success": True, "data": {"items": []}}))
+        return _FakeResp({"success": True, "data": {}})
+
+    def close(self):
+        pass
+
+
+def test_list_without_explicit_init_resolves_account_and_host():
+    """回归：没先调 init() 就列目录时，账号/接入点必须自动解析。
+
+    曾经因为 _ensure_hosts 只补接入点、账号仍是空串，导致
+    /file/list 发出 account="" 的请求，云盘回「资源不存在」这种牛头不对马嘴的错。
+    """
+    c = Yun139Client(authorization=_auth())
+    c._session = _FakeSession({})
+    items = c.list_files("/")
+    assert items == []
+    urls = [x["url"] for x in c._session.calls]
+    assert any("qryRoutePolicy" in u for u in urls), "应自动查询路由策略"
+    first = c._session.calls[0]
+    assert first["body"]["userInfo"]["accountName"] == "13800138000", first
+    assert c.personal_host == "https://personal-kd-njs.yun.139.com"
+    assert c.account_name() == "13800138000"
+
+
+def test_list_sends_correct_parent_and_500gb_header():
+    c = Yun139Client(authorization=_auth())
+    c._session = _FakeSession({})
+    c.list_files("/")
+    call = [x for x in c._session.calls if "/file/list" in x["url"]][0]
+    assert call["url"] == "https://personal-kd-njs.yun.139.com/file/list"
+    assert call["body"]["parentFileId"] == "/"
+    assert call["body"]["pageInfo"]["pageSize"] == 100
+    info = call["headers"].get("X-Yun-Client-Info", "")
+    assert info.split("|")[2] == "13", "个人云请求必须带 PC 客户端类型（500GB）"
+    assert info.split("|")[2] != "9"
+
+
+def test_list_handles_none_folder_and_stops_on_bad_cursor():
+    """游标原地打转时必须停下，不能无限翻页。"""
+    c = Yun139Client(authorization=_auth())
+
+    class LoopSession(_FakeSession):
+        def post(self, url, data=None, headers=None, timeout=None):
+            if "/file/list" in url:
+                self.calls.append({"url": url, "body": {}, "headers": {}})
+                return _FakeResp({"success": True, "data": {
+                    "items": [{"fileId": "f1", "name": "a.mkv", "type": "file", "size": 1}],
+                    "nextPageCursor": "SAME"}})
+            return super().post(url, data, headers, timeout)
+
+    c._session = LoopSession({})
+    items = c.list_files(None)
+    assert len(items) == 1
+    assert len(c._session.calls) <= 4, "游标不前进时必须及时停止"
+
+
+def test_quota_and_notfound_are_classified():
+    c = Yun139Client(authorization=_auth())
+    c._session = _FakeSession({"file/list": {"success": False, "message": "账号权益不足"}})
+    with pytest.raises(QuotaError):
+        c.list_files("/")
+    c2 = Yun139Client(authorization=_auth())
+    c2._session = _FakeSession({"file/list": {"success": False, "message": "资源不存在"}})
+    from yun139.errors import NotFoundError
+    with pytest.raises(NotFoundError):
+        c2.list_files("/")
 
 
 # ---------------------------------------------------------------------------
