@@ -1,23 +1,44 @@
+# 139Strm Pro —— Docker Compose（拉取官方镜像，无需源码）
+#
+# 用法：
+#   1. mkdir -p /docker/139strm && cd /docker/139strm
+#   2. 把本文件保存为 docker-compose.yml
+#   3. docker compose up -d
+#   4. 打开 http://宿主机IP:8025
+#
+# 注意：./config 和 ./strm 必须挂到宿主机，否则容器重建后配置和 strm 会丢。
+# 想从源码构建：把 image 行删掉、加回 build: .（需要先 git clone 本仓库）
+
 name: 139strm-pro
+
 services:
   139strm-pro:
-    # 需要在本地构建时，把下面一行换成： build: .
-    image: 139strm-pro:3.0.0
-    build: .
+    image: sadmion/139strm-pro:latest
     container_name: 139strm-pro
     restart: unless-stopped
     ports:
       - "8025:8025"
     volumes:
-      # 配置 + 任务列表 + 播放诊断（务必挂到宿主机，否则重建容器就丢）
+      # 配置 + 云盘凭据 + 任务列表 + 播放诊断（务必持久化）
       - ./config:/app/config
-      # 生成的 strm，Emby / Jellyfin / 飞牛影视 也挂这个
+      # 生成的 strm；Emby / Jellyfin / 飞牛影视 也挂这个目录
       - ./strm:/strm
     environment:
       - PORT=8025
       - CONFIG_PATH=/app/config/config.json
       - YUN139_OUTPUT_DIR=/strm
       - TZ=Asia/Shanghai
-      # 可选：用环境变量注入凭据（优先级高于界面配置）
+      # 可选：用环境变量注入凭据（优先级高于界面里填的）
       # - YUN139_AUTHORIZATION=
       # - YUN139_CLOUD_TYPE=personal_new
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8025')+'/health')\""]
+      interval: 60s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

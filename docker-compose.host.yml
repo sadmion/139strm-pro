@@ -1,11 +1,18 @@
+# 139Strm Pro —— Docker Compose（host 网络模式）
+#
+# 适用场景：与 Emby / Jellyfin / 飞牛影视 部署在**同一台主机**上。
+# host 网络下容器直接用宿主机端口，基础地址可以写 http://127.0.0.1:8025，
+# 同主机的播放器（含 Emby 容器）访问最稳。
+#
+# 用法：保存为 docker-compose.yml 后 docker compose up -d
+
 name: 139strm-pro
+
 services:
   139strm-pro:
-    build: .
-    image: 139strm-pro:3.0.0
+    image: sadmion/139strm-pro:latest
     container_name: 139strm-pro
     restart: unless-stopped
-    # host 网络：与 Emby 同主机时，strm 里可以直接写 http://127.0.0.1:8025
     network_mode: host
     volumes:
       - ./config:/app/config
@@ -15,3 +22,14 @@ services:
       - CONFIG_PATH=/app/config/config.json
       - YUN139_OUTPUT_DIR=/strm
       - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8025')+'/health')\""]
+      interval: 60s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
