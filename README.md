@@ -56,7 +56,31 @@ docker compose up -d --build
 > 不挂载 = 数据只写在容器里，**容器一删就全没了**（升级版本通常就是重建容器）。
 > 进「存储管理 → 💾 数据存储」可以确认两项是否都显示「✅ 已挂载/可写」。
 
-### 方式二：直接运行
+### 方式二：拉取现成镜像
+
+```bash
+# Docker Hub
+docker pull sadmion/139strm-pro:latest
+
+# 或者 GHCR（国内可能需要代理）
+docker pull ghcr.io/sadmion/139strm-pro:latest
+```
+
+拉下来之后直接 `docker run`：
+
+```bash
+mkdir -p 139strm/{config,strm}
+docker run -d --name 139strm-pro --restart unless-stopped \
+  -p 8025:8025 \
+  -v "$PWD/139strm/config:/app/config" \
+  -v "$PWD/139strm/strm:/strm" \
+  -e TZ=Asia/Shanghai \
+  sadmion/139strm-pro:latest
+```
+
+镜像同时提供 `linux/amd64` 与 `linux/arm64`（群晖 ARM、树莓派、飞牛 ARM 版都能用）。
+
+### 方式三：直接运行
 
 ```bash
 pip install -r requirements.txt
@@ -65,7 +89,7 @@ python app.py          # 默认端口 8025
 
 Windows 下双击 `start.bat` 也可以直接启动。
 
-### 方式三：Windows 本地跑 + Emby 同机
+### 方式四：Windows 本地跑 + Emby 同机
 
 ```bat
 set PORT=8025
@@ -73,6 +97,25 @@ set CONFIG_PATH=%~dp0config\config.json
 set YUN139_OUTPUT_DIR=%~dp0strm
 python app.py
 ```
+
+### 关于自动构建（GitHub Actions）
+
+仓库自带两条流水线：
+
+| 工作流 | 触发 | 作用 |
+|---|---|---|
+| `test` | 每次推送 / PR | 跑 41 项单元测试 + 端到端 mock 测试 |
+| `docker` | 推送到 `main` / 打 `v*` 标签 / 手动 | 测试通过后构建 amd64 + arm64 镜像并推送 |
+
+> **首次启用镜像发布需要在仓库 `Settings → Secrets and variables → Actions` 里添加两个 Secret：**
+>
+> | Name | Value |
+> |---|---|
+> | `DOCKERHUB_USERNAME` | `sadmion` |
+> | `DOCKERHUB_TOKEN` | Docker Hub → Account Settings → Security 创建的 **Read & Write** Token |
+>
+> 没配的话 `docker` 工作流会在「登录 Docker Hub」这步失败（`test` 工作流不受影响）。
+> 配好后到 Actions 页点 **Re-run**，或在源码里改点什么推一次即可。
 
 ---
 
